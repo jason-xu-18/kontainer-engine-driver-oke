@@ -1,0 +1,36 @@
+---
+pipeline:
+  build:
+    privileged: true
+    image: rancher/dapper:1.11.2
+    volumes:
+    - /var/run/docker.sock:/var/run/docker.sock
+    commands:
+    - dapper ci
+
+  github-binary-publish-release:
+    image: plugins/github-release
+    files:
+    - bin/kontainer-engine-driver-oke-*
+    checksum:
+    - sha256
+    secrets: [github_token]
+    when:
+      branch: master
+      event: tag
+      ref:
+        exclude: [ refs/tags/*rc* ]
+
+  github-binary-publish-prerelease:
+    image: plugins/github-release
+    prerelease: true
+    files:
+    - bin/kontainer-engine-driver-oke-*
+    checksum:
+    - sha256
+    secrets: [github_token]
+    when:
+      branch: master
+      event: tag
+      ref:
+        include: [ refs/tags/*rc* ]
