@@ -524,7 +524,7 @@ func (d *Driver) Remove(ctx context.Context, info *types.ClusterInfo) error {
 	}
 	
 	deleteReq := containerengine.DeleteClusterRequest{
-		ClusterId: state。ID,
+		ClusterId: state.ID,
 	}
 
 	containerEngineClient.DeleteCluster(ctx, deleteReq)
