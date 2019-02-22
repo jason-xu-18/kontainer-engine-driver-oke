@@ -3,12 +3,15 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
-
+	"sync"
+	"time"
 
 	"github.com/oracle/oci-go-sdk/common"
 	"github.com/oracle/oci-go-sdk/containerengine"
 	"github.com/oracle/oci-go-sdk/core"
+	"github.com/oracle/oci-go-sdk/identity"
 	"github.com/rancher/kontainer-engine/drivers/options"
 	"github.com/rancher/kontainer-engine/types"
 	"github.com/sirupsen/logrus"
@@ -42,8 +45,10 @@ type state struct {
 	NetworkCompartment string `json:"networkCompartment"`
 	//the name of the virtual cloud network
 	Vcn string `json:"vcn"`
-	//comma-separated list of subnets in the virtual network to use,just support two subnets
-	Subnets []string `json:"subnets"`
+	//subnets1 in the virtual network to use
+	Subnets1 string `json:"subnets1"`
+	//subnets2 in the virtual network to use
+	Subnets2 string `json:"subnets2"`
 	//the CIDR block for Kubernetes services
 	ServicesCidr string `json:"serviceCidr"`
 	//The CIDR block for Kubernetes pods
@@ -61,11 +66,11 @@ type state struct {
 	//The number of nodes in each subnet
 	QuantityPerSubnet string `json:"quantityPerSubnet"`
 	//The SSH public key to access your nodes
-	NodeSshKey string `json:"nodeSshKey,omitempty"`
+	NodeSSHKey string `json:"nodeSshKey,omitempty"`
 	//The api key of the user
-	ApiKey string `json:"apiKey,omitempty"`
+	APIKey string `json:"apiKey,omitempty"`
 	//The api key of the user
-	FingerPrint string `json:"apiKey,omitempty"`
+	FingerPrint string `json:"fingerPrint,omitempty"`
 	//The map of Kubernetes labels (key/value pairs) to be applied to each node
 	Labels map[string]string `json:"key,value"`
 
@@ -110,7 +115,9 @@ func (d *Driver) GetDriverCreateOptions(ctx context.Context) (*types.DriverFlags
 	driverFlag.Options["region"] = &types.Flag{
 		Type:  types.StringType,
 		Usage: "resource region",
-		value: "us-phoenix-1",
+		Default: &types.Default{
+			DefaultString: "us-phoenix-1",
+		},
 	}
 	driverFlag.Options["name"] = &types.Flag{
 		Type:  types.StringType,
@@ -123,7 +130,9 @@ func (d *Driver) GetDriverCreateOptions(ctx context.Context) (*types.DriverFlags
 	driverFlag.Options["kubernetes-version"] = &types.Flag{
 		Type:  types.StringType,
 		Usage: "The version of Kubernetes specified when creating the managed cluster",
-		value: "v1.11.5",
+		Default: &types.Default{
+			DefaultString: "v1.11.5",
+		},
 	}
 	driverFlag.Options["network-compartment"] = &types.Flag{
 		Type:  types.StringType,
@@ -133,6 +142,14 @@ func (d *Driver) GetDriverCreateOptions(ctx context.Context) (*types.DriverFlags
 		Type:  types.StringType,
 		Usage: "the name of the virtual cloud network",
 	}
+	driverFlag.Options["subnets1"] = &types.Flag{
+		Type:  types.StringType,
+		Usage: "subnets1 in the virtual network to use",
+	}
+	driverFlag.Options["subnets2"] = &types.Flag{
+		Type:  types.StringType,
+		Usage: "subnets2 in the virtual network to use",
+	}
 	driverFlag.Options["subnets"] = &types.Flag{
 		Type:  types.StringSliceType,
 		Usage: "comma-separated list of subnets in the virtual network to use,just support two subnets",
@@ -140,32 +157,44 @@ func (d *Driver) GetDriverCreateOptions(ctx context.Context) (*types.DriverFlags
 	driverFlag.Options["service-cidr"] = &types.Flag{
 		Type:  types.StringType,
 		Usage: "the CIDR block for Kubernetes services",
-		value: "10.96.0.0/16",
+		Default: &types.Default{
+			DefaultString: "10.96.0.0/16",
+		},
 	}
 	driverFlag.Options["pods-cidr"] = &types.Flag{
 		Type:  types.StringType,
 		Usage: "the CIDR block for Kubernetes pods",
-		value: "10.244.0.0/16",
+		Default: &types.Default{
+			DefaultString: "10.244.0.0/16",
+		},
 	}
 	driverFlag.Options["nodepool-name"] = &types.Flag{
 		Type:  types.StringType,
 		Usage: "the name of the node pool",
-		value: "pool1",
+		Default: &types.Default{
+			DefaultString: "pool1",
+		},
 	}
 	driverFlag.Options["kubernetes-versionnode"] = &types.Flag{
 		Type:  types.StringType,
 		Usage: "the version of Kubernetes running on the nodes in the node pool",
-		value: "v1.11.5",
+		Default: &types.Default{
+			DefaultString: "v1.11.5",
+		},
 	}
 	driverFlag.Options["node-image"] = &types.Flag{
 		Type:  types.StringType,
 		Usage: "the image running on the nodes in the node pool",
-		value: "Oracle-Linux-7.5",
+		Default: &types.Default{
+			DefaultString: "Oracle-Linux-7.5",
+		},
 	}
 	driverFlag.Options["node-shape"] = &types.Flag{
 		Type:  types.StringType,
 		Usage: "the node shape of the nodes in the node pool",
-		value: "VM.Standard2.2",
+		Default: &types.Default{
+			DefaultString: "VM.Standard2.2",
+		},
 	}
 	driverFlag.Options["node-subnets"] = &types.Flag{
 		Type:  types.StringType,
@@ -174,7 +203,9 @@ func (d *Driver) GetDriverCreateOptions(ctx context.Context) (*types.DriverFlags
 	driverFlag.Options["quantity-persubnet"] = &types.Flag{
 		Type:  types.StringType,
 		Usage: "the number of nodes in each subnet",
-		value: "1",
+		Default: &types.Default{
+			DefaultString: "1",
+		},
 	}
 	driverFlag.Options["ssh-key"] = &types.Flag{
 		Type:  types.StringType,
@@ -204,7 +235,9 @@ func (d *Driver) GetDriverUpdateOptions(ctx context.Context) (*types.DriverFlags
 	driverFlag.Options["kubernetes-version"] = &types.Flag{
 		Type:  types.StringType,
 		Usage: "Version of Kubernetes specified when creating the managed cluster",
-		value: "v1.11.5",
+		Default: &types.Default{
+			DefaultString: "v1.11.5",
+		},
 	}
 	return &driverFlag, nil
 }
@@ -225,21 +258,20 @@ func getStateFromOpts(driverOptions *types.DriverOptions) (state, error) {
 	d.KubernetesVersion = options.GetValueFromDriverOptions(driverOptions, types.StringType, "kubernetes-version").(string)
 	d.NetworkCompartment = options.GetValueFromDriverOptions(driverOptions, types.StringType, "network-compartment").(string)
 	d.Vcn = options.GetValueFromDriverOptions(driverOptions, types.StringType, "vcn").(string)
-	d.Subnets = options.GetValueFromDriverOptions(driverOptions, types.StringSliceType, "subnets").(*types.StringSlice)
-	for _, Subnet := range Subnets {
-		d.Subnets = append(Subnets, Subnet)
-	}
+	d.Subnets1 = options.GetValueFromDriverOptions(driverOptions, types.StringType, "subnets1").(string)
+	d.Subnets2 = options.GetValueFromDriverOptions(driverOptions, types.StringType, "subnets2").(string)
 	d.ServicesCidr = options.GetValueFromDriverOptions(driverOptions, types.StringType, "service-cidr").(string)
-	d.PodsCidr = options.GetValueFromDriverOptions(driverOptions, types.IntType, "pods-cidr").(string)
+	d.PodsCidr = options.GetValueFromDriverOptions(driverOptions, types.StringType, "pods-cidr").(string)
 	d.NodePoolName = options.GetValueFromDriverOptions(driverOptions, types.StringType, "nodepool-name").(string)
 	d.KubernetesVersionNode = options.GetValueFromDriverOptions(driverOptions, types.StringType, "kubernetes-versionnode").(string)
 	d.NodeImageName = options.GetValueFromDriverOptions(driverOptions, types.StringType, "node-image").(string)
 	d.NodeShape = options.GetValueFromDriverOptions(driverOptions, types.StringType, "node-shape").(string)
 	d.NodeSubnets = options.GetValueFromDriverOptions(driverOptions, types.StringType, "node-subnets").(string)
 	d.QuantityPerSubnet = options.GetValueFromDriverOptions(driverOptions, types.StringType, "quantity-persubnet").(string)
-	d.NodeSshKey = options.GetValueFromDriverOptions(driverOptions, types.StringType, "ssh-key").(string)
-	d.ApiKey = options.GetValueFromDriverOptions(driverOptions, types.StringType, "api-key").(string)
+	d.NodeSSHKey = options.GetValueFromDriverOptions(driverOptions, types.StringType, "ssh-key").(string)
+	d.APIKey = options.GetValueFromDriverOptions(driverOptions, types.StringType, "api-key").(string)
 	d.FingerPrint = options.GetValueFromDriverOptions(driverOptions, types.StringType, "finger-print").(string)
+	d.Labels = map[string]string{}
 	labelValues := options.GetValueFromDriverOptions(driverOptions, types.StringSliceType, "labels").(*types.StringSlice)
 	for _, part := range labelValues.Value {
 		kv := strings.Split(part, "=")
@@ -267,11 +299,11 @@ func (s *state) validate() error {
 		return fmt.Errorf("Region is required")
 	}
 
-	if s.ClusterCompartmentID == "" {
+	if s.ClusterCompartment == "" {
 		return fmt.Errorf("Cluster Compartment OCID is required")
 	}
 
-	if s.ApiKey == "" {
+	if s.APIKey == "" {
 		return fmt.Errorf("Api key is required")
 	}
 	return nil
@@ -281,7 +313,7 @@ func (s *state) validate() error {
 func (d *Driver) Create(ctx context.Context, opts *types.DriverOptions, _ *types.ClusterInfo) (*types.ClusterInfo, error) {
 	logrus.Infof("Starting create")
 
-	state, err := getStateFromOptions(options)
+	state, err := getStateFromOpts(opts)
 	if err != nil {
 		return nil, fmt.Errorf("error parsing state: %v", err)
 	}
@@ -290,8 +322,8 @@ func (d *Driver) Create(ctx context.Context, opts *types.DriverOptions, _ *types
 	logrus.Infof("user: %s", state.UserID)
 	logrus.Infof("region: %s", state.Region)
 	logrus.Infof("finerPrint: %s", state.FingerPrint)
-	logrus.Infof("apikey: %s", state.ApiKey)
-	provider := common.NewRawConfigurationProvider(state.TenancyID, state.UserID, state.Region, state.FingerPrint, state.ApiKey, nil)
+	logrus.Infof("apikey: %s", state.APIKey)
+	provider := common.NewRawConfigurationProvider(state.TenancyID, state.UserID, state.Region, state.FingerPrint, state.APIKey, nil)
 
 	identityClient, err := identity.NewIdentityClientWithConfigurationProvider(provider)
 	if err != nil {
@@ -304,10 +336,10 @@ func (d *Driver) Create(ctx context.Context, opts *types.DriverOptions, _ *types
 	}
 
 	request := identity.ListAvailabilityDomainsRequest{
-		CompartmentId: &tenancyID,
+		CompartmentId: &state.TenancyID,
 	}
 
-	ads, err := c.ListAvailabilityDomains(ctx, request)
+	ads, err := identityClient.ListAvailabilityDomains(ctx, request)
 	if err != nil {
 		return nil, fmt.Errorf("error listing available domain: %v", err)
 	}
@@ -320,67 +352,85 @@ func (d *Driver) Create(ctx context.Context, opts *types.DriverOptions, _ *types
 		return nil, fmt.Errorf("error creating vcn: %v", err)
 	}
 
-	name := state.Name
+	compartmentID := state.NetworkCompartment
 	if state.NetworkCompartment == "" {
-		compartmentId = common.String(state.ClusterCompartment)
-	} else {
-		compartmentId = common.String(state.NetworkCompartment)
+		compartmentID = state.ClusterCompartment
 	}
-	vcnID := vcn.Id
+	vcnID := *vcn.Id
 	kubernetesVersion := state.KubernetesVersion
-	subnets := state.Subnets
+	subnets1 := state.Subnets1
+	subnets2 := state.Subnets2
+	nodeSubnets := state.NodeSubnets
 	subnet1CIDR := common.String("10.0.0.0/24")
 	dnsLabel1 := common.String("subnetdns1")
-	subnet1 := CreateOrGetSubnetWithDetails(ctx, provider, compartmentId, common.String(subnets[0]), subnet1CIDR, dnsLabel1, ads.Items[0].Name)
+	subnet1, err := CreateOrGetSubnetWithDetails(ctx, provider, compartmentID, vcnID, common.String(subnets1), subnet1CIDR, dnsLabel1, ads.Items[0].Name)
+	if err != nil {
+		return nil, fmt.Errorf("error create subnet1: %v", err)
+	}
 	logrus.Infof("create subnet1 complete")
 	logrus.Infof("subnet1:", subnet1)
 
 	subnet2CIDR := common.String("10.0.1.0/24")
 	dnsLabel2 := common.String("subnetdns2")
-	subnet2 := CreateOrGetSubnetWithDetails(ctx, provider, compartmentId, common.String(subnets[1]), subnet2CIDR, dnsLabel2, ads.Items[1].Name)
+	subnet2, err := CreateOrGetSubnetWithDetails(ctx, provider, compartmentID, vcnID, common.String(subnets2), subnet2CIDR, dnsLabel2, ads.Items[1].Name)
+	if err != nil {
+		return nil, fmt.Errorf("error create subnet1: %v", err)
+	}
 	logrus.Infof("create subnet2 complete")
 	logrus.Infof("subnet2:", subnet2)
 
 	subnet3CIDR := common.String("10.0.2.0/24")
-	dnsLabel2 := common.String("subnetdns3")
-	subnet3 := CreateOrGetSubnetWithDetails(ctx, provider, compartmentId, common.String(subnets[2]), subnet3CIDR, dnsLabel3, ads.Items[2].Name)
+	dnsLabel3 := common.String("subnetdns3")
+	subnet3, err := CreateOrGetSubnetWithDetails(ctx, provider, compartmentID, vcnID, common.String(nodeSubnets), subnet3CIDR, dnsLabel3, ads.Items[2].Name)
+	if err != nil {
+		return nil, fmt.Errorf("error create subnet1: %v", err)
+	}
 	logrus.Infof("create subnet3 complete")
-	logrus.Infof("subnet2:", subnet2)
+	logrus.Infof("subnet3:", subnet3)
 
 	logrus.Infof("creating cluster")
-	createClusterResp := createCluster(ctx, containerEngineClient, state.ClusterCompartment, *vcn.Id, kubernetesVersion, *subnet1.Id, *subnet2.Id)
+	createClusterResp, err := createCluster(ctx, containerEngineClient, state.Name, compartmentID, vcnID, kubernetesVersion, *subnet1.Id, *subnet2.Id)
+	if err != nil {
+		return nil, fmt.Errorf("error create cluster: %v", err)
+	}
 
 	// wait until work request complete
-	workReqResp := waitUntilWorkRequestComplete(c, createClusterResp.OpcWorkRequestId)
+	workReqResp, err := waitUntilWorkRequestComplete(containerEngineClient, createClusterResp.OpcWorkRequestId)
+	if err != nil {
+		return nil, fmt.Errorf("error wait request complete: %v", err)
+	}
 	logrus.Infof("cluster created")
 	clusterID := getResourceID(workReqResp.Resources, containerengine.WorkRequestResourceActionTypeCreated, "CLUSTER")
 
-	state.ID = clusterID
+	state.ID = *clusterID
 
 	// create NodePool
 	createNodePoolReq := containerengine.CreateNodePoolRequest{}
-	createNodePoolReq.CompartmentId = common.String(state.ClusterCompartment)
+	createNodePoolReq.CompartmentId = common.String(compartmentID)
 	createNodePoolReq.Name = common.String(state.Name)
-	createNodePoolReq.ClusterId = common.String(clusterID)
+	createNodePoolReq.ClusterId = clusterID
 	createNodePoolReq.KubernetesVersion = common.String(state.KubernetesVersionNode)
 	createNodePoolReq.NodeImageName = common.String(state.NodeImageName)
 	createNodePoolReq.NodeShape = common.String(state.NodeShape)
-	createNodePoolReq.SubnetIds = []string{subnet3.Id}
+	createNodePoolReq.SubnetIds = []string{*subnet3.Id}
 	createNodePoolReq.InitialNodeLabels = []containerengine.KeyValue{}
 	for key, value := range state.Labels {
 		tmpKey := key
 		tmpValue := value
 		keyValue := containerengine.KeyValue{Key: &tmpKey, Value: &tmpValue}
-		createNodePoolReq.InitialNodeLabels = append(label, keyValue)
+		createNodePoolReq.InitialNodeLabels = append(createNodePoolReq.InitialNodeLabels, keyValue)
 	}
 
-	createNodePoolResp, err := c.CreateNodePool(ctx, createNodePoolReq)
+	createNodePoolResp, err := containerEngineClient.CreateNodePool(ctx, createNodePoolReq)
 	if err != nil {
 		return nil, fmt.Errorf("error creating node pool: %v", err)
 	}
 	logrus.Infof("creating nodepool")
 
-	workReqResp = waitUntilWorkRequestComplete(c, createNodePoolResp.OpcWorkRequestId)
+	workReqResp, err = waitUntilWorkRequestComplete(containerEngineClient, createNodePoolResp.OpcWorkRequestId)
+	if err != nil {
+		return nil, fmt.Errorf("error wait request complete: %v", err)
+	}
 	logrus.Infof("nodepool created")
 
 	info := &types.ClusterInfo{}
@@ -415,7 +465,7 @@ func (d *Driver) Update(ctx context.Context, info *types.ClusterInfo, opts *type
 		return nil, fmt.Errorf("error parsing state: %v", err)
 	}
 
-	newState, err := getStateFromOptions(options)
+	newState, err := getStateFromOpts(opts)
 	if err != nil {
 		return nil, fmt.Errorf("error parsing state: %v", err)
 	}
@@ -424,8 +474,8 @@ func (d *Driver) Update(ctx context.Context, info *types.ClusterInfo, opts *type
 	logrus.Infof("user: %s", newState.UserID)
 	logrus.Infof("region: %s", newState.Region)
 	logrus.Infof("finerPrint: %s", newState.FingerPrint)
-	logrus.Infof("apikey: %s", newState.ApiKey)
-	provider := common.NewRawConfigurationProvider(newState.TenancyID, newState.UserID, newState.Region, newState.FingerPrint, newState.ApiKey, nil)
+	logrus.Infof("apikey: %s", newState.APIKey)
+	provider := common.NewRawConfigurationProvider(newState.TenancyID, newState.UserID, newState.Region, newState.FingerPrint, newState.APIKey, nil)
 
 	containerEngineClient, err := containerengine.NewContainerEngineClientWithConfigurationProvider(provider)
 	if err != nil {
@@ -433,16 +483,16 @@ func (d *Driver) Update(ctx context.Context, info *types.ClusterInfo, opts *type
 	}
 
 	updateReq := containerengine.UpdateClusterRequest{}
-	updateReq.ClusterId = newState.ID
-	getReq := containerengine.GetClusterRequest{
-		ClusterId: updateReq.ClusterId,
-	}
-	getResp, err := containerEngineClient.GetCluster(ctx, getReq)
+	updateReq.ClusterId = common.String(newState.ID)
+	// getReq := containerengine.GetClusterRequest{
+	// 	ClusterId: updateReq.ClusterId,
+	// }
+	// _, err := containerEngineClient.GetCluster(ctx, getReq)
 	if newState.Name != "" {
-		updateReq.Name = newState.Name
+		updateReq.Name = common.String(newState.Name)
 	}
 	if newState.KubernetesVersion != "" {
-		updateReq.kubernetesVersion = newState.KubernetesVersion
+		updateReq.KubernetesVersion = common.String(newState.KubernetesVersion)
 	}
 
 	updateResp, err := containerEngineClient.UpdateCluster(ctx, updateReq)
@@ -452,7 +502,10 @@ func (d *Driver) Update(ctx context.Context, info *types.ClusterInfo, opts *type
 	logrus.Infof("updating cluster")
 
 	// wait until update complete
-	workReqResp := waitUntilWorkRequestComplete(containerEngineClient, updateResp.OpcWorkRequestId)
+	waitUntilWorkRequestComplete(containerEngineClient, updateResp.OpcWorkRequestId)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("error wait request complete: %v", err)
+	// }
 	logrus.Infof("cluster updated")
 	state.Name = newState.Name
 	state.ID = newState.ID
@@ -466,12 +519,12 @@ func (d *Driver) PostCheck(ctx context.Context, info *types.ClusterInfo) (*types
 		return nil, err
 	}
 
-	logrus.Infof("tenancy: %s", newState.TenancyID)
-	logrus.Infof("user: %s", newState.UserID)
-	logrus.Infof("region: %s", newState.Region)
-	logrus.Infof("finerPrint: %s", newState.FingerPrint)
-	logrus.Infof("apikey: %s", newState.ApiKey)
-	provider := common.NewRawConfigurationProvider(newState.TenancyID, newState.UserID, newState.Region, newState.FingerPrint, newState.ApiKey, nil)
+	logrus.Infof("tenancy: %s", state.TenancyID)
+	logrus.Infof("user: %s", state.UserID)
+	logrus.Infof("region: %s", state.Region)
+	logrus.Infof("finerPrint: %s", state.FingerPrint)
+	logrus.Infof("apikey: %s", state.APIKey)
+	provider := common.NewRawConfigurationProvider(state.TenancyID, state.UserID, state.Region, state.FingerPrint, state.APIKey, nil)
 
 	containerEngineClient, err := containerengine.NewContainerEngineClientWithConfigurationProvider(provider)
 	if err != nil {
@@ -479,7 +532,7 @@ func (d *Driver) PostCheck(ctx context.Context, info *types.ClusterInfo) (*types
 	}
 
 	getReq := containerengine.GetClusterRequest{
-		ClusterId: state.ID,
+		ClusterId: common.String(state.ID),
 	}
 
 	cluster, err := containerEngineClient.GetCluster(ctx, getReq)
@@ -487,7 +540,7 @@ func (d *Driver) PostCheck(ctx context.Context, info *types.ClusterInfo) (*types
 		return nil, err
 	}
 
-	info.Endpoint = *cluster.Endpoints
+	info.Endpoint = *cluster.Endpoints.Kubernetes
 	info.Version = *cluster.KubernetesVersion
 	//	info.Username = cluster.MasterAuth.Username
 	//	info.Password = cluster.MasterAuth.Password
@@ -515,16 +568,16 @@ func (d *Driver) Remove(ctx context.Context, info *types.ClusterInfo) error {
 	logrus.Infof("user: %s", state.UserID)
 	logrus.Infof("region: %s", state.Region)
 	logrus.Infof("finerPrint: %s", state.FingerPrint)
-	logrus.Infof("apikey: %s", state.ApiKey)
-	provider := common.NewRawConfigurationProvider(state.TenancyID, state.UserID, state.Region, state.FingerPrint, state.ApiKey, nil)
+	logrus.Infof("apikey: %s", state.APIKey)
+	provider := common.NewRawConfigurationProvider(state.TenancyID, state.UserID, state.Region, state.FingerPrint, state.APIKey, nil)
 
 	containerEngineClient, err := containerengine.NewContainerEngineClientWithConfigurationProvider(provider)
 	if err != nil {
-		return nil, fmt.Errorf("error creating Container Engine client: %v", err)
+		return fmt.Errorf("error creating Container Engine client: %v", err)
 	}
-	
+
 	deleteReq := containerengine.DeleteClusterRequest{
-		ClusterId: state.ID,
+		ClusterId: common.String(state.ID),
 	}
 
 	containerEngineClient.DeleteCluster(ctx, deleteReq)
@@ -535,36 +588,51 @@ func (d *Driver) Remove(ctx context.Context, info *types.ClusterInfo) error {
 }
 
 func (d *Driver) GetClusterSize(ctx context.Context, info *types.ClusterInfo) (*types.NodeCount, error) {
-	cluster, err := d.getClusterStats(ctx, info)
-
-	if err != nil {
-		return nil, err
-	}
-
-	version := &types.NodeCount{Count: int64(cluster.NodePools[0].InitialNodeCount)}
-
-	return version, nil
-}
-
-func (d *Driver) GetVersion(ctx context.Context, info *types.ClusterInfo) (*types.KubernetesVersion, error) {
-	logrus.Info("updating Kubernete version")
+	logrus.Info("get Kubernete version")
 
 	state, err := getState(info)
 	if err != nil {
 		return nil, fmt.Errorf("error parsing state: %v", err)
 	}
 
-	newState, err := getStateFromOptions(options)
+	logrus.Infof("tenancy: %s", state.TenancyID)
+	logrus.Infof("user: %s", state.UserID)
+	logrus.Infof("region: %s", state.Region)
+	logrus.Infof("finerPrint: %s", state.FingerPrint)
+	logrus.Infof("apikey: %s", state.APIKey)
+	// provider := common.NewRawConfigurationProvider(state.TenancyID, state.UserID, state.Region, state.FingerPrint, state.APIKey, nil)
+
+	// containerEngineClient, err := containerengine.NewContainerEngineClientWithConfigurationProvider(provider)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("error creating Container Engine client: %v", err)
+	// }
+
+	updateReq := containerengine.UpdateClusterRequest{}
+	updateReq.ClusterId = common.String(state.ID)
+	// getReq := containerengine.GetClusterRequest{
+	// 	ClusterId: updateReq.ClusterId,
+	// }
+	// _, err := containerEngineClient.GetCluster(ctx, getReq)
+
+	version := &types.NodeCount{Count: int64(0)}
+
+	return version, nil
+}
+
+func (d *Driver) GetVersion(ctx context.Context, info *types.ClusterInfo) (*types.KubernetesVersion, error) {
+	logrus.Info("get Kubernete version")
+
+	state, err := getState(info)
 	if err != nil {
 		return nil, fmt.Errorf("error parsing state: %v", err)
 	}
 
-	logrus.Infof("tenancy: %s", newState.TenancyID)
-	logrus.Infof("user: %s", newState.UserID)
-	logrus.Infof("region: %s", newState.Region)
-	logrus.Infof("finerPrint: %s", newState.FingerPrint)
-	logrus.Infof("apikey: %s", newState.ApiKey)
-	provider := common.NewRawConfigurationProvider(newState.TenancyID, newState.UserID, newState.Region, newState.FingerPrint, newState.ApiKey, nil)
+	logrus.Infof("tenancy: %s", state.TenancyID)
+	logrus.Infof("user: %s", state.UserID)
+	logrus.Infof("region: %s", state.Region)
+	logrus.Infof("finerPrint: %s", state.FingerPrint)
+	logrus.Infof("apikey: %s", state.APIKey)
+	provider := common.NewRawConfigurationProvider(state.TenancyID, state.UserID, state.Region, state.FingerPrint, state.APIKey, nil)
 
 	containerEngineClient, err := containerengine.NewContainerEngineClientWithConfigurationProvider(provider)
 	if err != nil {
@@ -572,13 +640,13 @@ func (d *Driver) GetVersion(ctx context.Context, info *types.ClusterInfo) (*type
 	}
 
 	updateReq := containerengine.UpdateClusterRequest{}
-	updateReq.ClusterId = newState.ID
+	updateReq.ClusterId = common.String(state.ID)
 	getReq := containerengine.GetClusterRequest{
 		ClusterId: updateReq.ClusterId,
 	}
 	getResp, err := containerEngineClient.GetCluster(ctx, getReq)
 
-	version := &types.KubernetesVersion{Version: getResp.Cluster.KubernetesVersion}
+	version := &types.KubernetesVersion{Version: *getResp.Cluster.KubernetesVersion}
 
 	return version, nil
 }
@@ -588,52 +656,46 @@ func (d *Driver) SetVersion(ctx context.Context, info *types.ClusterInfo, versio
 
 	state, err := getState(info)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing state: %v", err)
+		return fmt.Errorf("error parsing state: %v", err)
 	}
 
-	newState, err := getStateFromOptions(options)
-	if err != nil {
-		return nil, fmt.Errorf("error parsing state: %v", err)
-	}
-
-	logrus.Infof("tenancy: %s", newState.TenancyID)
-	logrus.Infof("user: %s", newState.UserID)
-	logrus.Infof("region: %s", newState.Region)
-	logrus.Infof("finerPrint: %s", newState.FingerPrint)
-	logrus.Infof("apikey: %s", newState.ApiKey)
-	provider := common.NewRawConfigurationProvider(newState.TenancyID, newState.UserID, newState.Region, newState.FingerPrint, newState.ApiKey, nil)
+	logrus.Infof("tenancy: %s", state.TenancyID)
+	logrus.Infof("user: %s", state.UserID)
+	logrus.Infof("region: %s", state.Region)
+	logrus.Infof("finerPrint: %s", state.FingerPrint)
+	logrus.Infof("apikey: %s", state.APIKey)
+	provider := common.NewRawConfigurationProvider(state.TenancyID, state.UserID, state.Region, state.FingerPrint, state.APIKey, nil)
 
 	containerEngineClient, err := containerengine.NewContainerEngineClientWithConfigurationProvider(provider)
 	if err != nil {
-		return nil, fmt.Errorf("error creating Container Engine client: %v", err)
+		return fmt.Errorf("error creating Container Engine client: %v", err)
 	}
 
 	updateReq := containerengine.UpdateClusterRequest{}
-	updateReq.ClusterId = newState.ID
-	getReq := containerengine.GetClusterRequest{
-		ClusterId: updateReq.ClusterId,
-	}
-	getResp, err := containerEngineClient.GetCluster(ctx, getReq)
-	if newState.Name != "" {
-		updateReq.Name = newState.Name
-	}
-	if newState.KubernetesVersion != "" {
-		updateReq.kubernetesVersion = newState.KubernetesVersion
+	updateReq.ClusterId = common.String(state.ID)
+	// getReq := containerengine.GetClusterRequest{
+	// 	ClusterId: updateReq.ClusterId,
+	// }
+	// _, err := containerEngineClient.GetCluster(ctx, getReq)
+
+	if state.KubernetesVersion != "" {
+		updateReq.KubernetesVersion = common.String(version.Version)
 	}
 
 	updateResp, err := containerEngineClient.UpdateCluster(ctx, updateReq)
 	if err != nil {
-		return nil, fmt.Errorf("error update cluster: %v", err)
+		return fmt.Errorf("error update cluster: %v", err)
 	}
 	logrus.Infof("updating cluster")
 
 	// wait until update complete
-	workReqResp := waitUntilWorkRequestComplete(containerEngineClient, updateResp.OpcWorkRequestId)
+	waitUntilWorkRequestComplete(containerEngineClient, updateResp.OpcWorkRequestId)
+	// if err != nil {
+	// 	return fmt.Errorf("error wait request complete: %v", err)
+	// }
 	logrus.Infof("cluster updated")
-	state.Name = newState.Name
-	state.ID = newState.ID
-	state.KubernetesVersion = newState.KubernetesVersion
-	return info, storeState(info, state)
+	state.KubernetesVersion = version.Version
+	storeState(info, state)
 
 	return nil
 }
@@ -646,15 +708,20 @@ func (d *Driver) GetCapabilities(ctx context.Context) (*types.Capabilities, erro
 func CreateOrGetVcn(ctx context.Context, provider common.ConfigurationProvider, state state) (core.Vcn, error) {
 	c, err := core.NewVirtualNetworkClientWithConfigurationProvider(provider)
 	if err != nil {
-		return nil, fmt.Errorf("error creating VirtualNetworkClient: %v", err)
+		return core.Vcn{}, fmt.Errorf("error creating VirtualNetworkClient: %v", err)
 	}
 
-	vcnItems := listVcns(ctx, c)
+	compartmentID := common.String(state.NetworkCompartment)
+	if state.NetworkCompartment == "" {
+		compartmentID = common.String(state.ClusterCompartment)
+	}
+
+	vcnItems := listVcns(ctx, c, compartmentID)
 
 	for _, element := range vcnItems {
-		if *element.DisplayName == state.Vcn {
+		if *element.Id == state.Vcn {
 			// VCN already created, return it
-			return element
+			return element, nil
 		}
 	}
 
@@ -665,52 +732,77 @@ func CreateOrGetVcn(ctx context.Context, provider common.ConfigurationProvider, 
 	} else {
 		request.CidrBlock = common.String(state.ServicesCidr)
 	}
-	if state.NetworkCompartment == "" {
-		request.CompartmentId = common.String(state.ClusterCompartment)
-	} else {
-		request.CompartmentId = common.String(state.NetworkCompartment)
-	}
-	request.DisplayName = common.String(state.Vcn)
+
+	request.CompartmentId = compartmentID
+
+	request.DisplayName = common.String("rancherVcn")
 	request.DnsLabel = common.String("vcndns")
 
 	r, err := c.CreateVcn(ctx, request)
 	if err != nil {
-		return nil, fmt.Errorf("error creating VCN: %v", err)
+		return core.Vcn{}, fmt.Errorf("error creating VCN: %v", err)
 	}
-	return r.Vcn
+	return r.Vcn, nil
+}
+
+func listVcns(ctx context.Context, c core.VirtualNetworkClient, CompartmentID *string) []core.Vcn {
+	request := core.ListVcnsRequest{
+		CompartmentId: CompartmentID,
+	}
+
+	r, err := c.ListVcns(ctx, request)
+	if err != nil {
+		fmt.Println("error list vcn:", err)
+	}
+	return r.Items
+}
+
+func listSubnets(ctx context.Context, c core.VirtualNetworkClient, provider common.ConfigurationProvider, CompartmentID *string, vcnID *string) []core.Subnet {
+
+	request := core.ListSubnetsRequest{
+		CompartmentId: CompartmentID,
+		VcnId:         vcnID,
+	}
+
+	r, err := c.ListSubnets(ctx, request)
+	if err != nil {
+		fmt.Println("error list subnets:", err)
+	}
+
+	return r.Items
 }
 
 // CreateOrGetSubnetWithDetails either creates a new Virtual Cloud Network (VCN) or get the one already exist
 // with detail info
-func CreateOrGetSubnetWithDetails(ctx context.Context, provider common.ConfigurationProvider, compartmentId string, vcnID string, displayName *string, cidrBlock *string, dnsLabel *string, availableDomain *string) (core.Subnet, error) {
+func CreateOrGetSubnetWithDetails(ctx context.Context, provider common.ConfigurationProvider, CompartmentID string, vcnID string, subnetID *string, cidrBlock *string, dnsLabel *string, availableDomain *string) (core.Subnet, error) {
 	c, err := core.NewVirtualNetworkClientWithConfigurationProvider(provider)
 	if err != nil {
-		return nil, fmt.Errorf("error creating virtual network client: %v", err)
+		return core.Subnet{}, fmt.Errorf("error creating virtual network client: %v", err)
 	}
 
-	subnets := listSubnets(ctx, c, provider)
+	subnets := listSubnets(ctx, c, provider, common.String(CompartmentID), common.String(vcnID))
 
 	// check if the subnet has already been created
 	for _, element := range subnets {
-		if *element.DisplayName == *displayName {
+		if *element.Id == *subnetID {
 			// find the subnet, return it
-			return element
+			return element, nil
 		}
 	}
 
 	// create a new subnet
 	request := core.CreateSubnetRequest{}
 	request.AvailabilityDomain = availableDomain
-	request.CompartmentId = common.String(compartmentId)
+	request.CompartmentId = common.String(CompartmentID)
 	request.CidrBlock = cidrBlock
-	request.DisplayName = displayName
+	request.DisplayName = common.String("rancherSubnets")
 	request.DnsLabel = dnsLabel
 	request.RequestMetadata = GetRequestMetadataWithDefaultRetryPolicy()
-	request.VcnId = vcnID
+	request.VcnId = common.String(vcnID)
 
 	r, err := c.CreateSubnet(ctx, request)
 	if err != nil {
-		return nil, fmt.Errorf("error creating subnet: %v", err)
+		return core.Subnet{}, fmt.Errorf("error creating subnet: %v", err)
 	}
 
 	// retry condition check, stop unitl return true
@@ -729,7 +821,7 @@ func CreateOrGetSubnetWithDetails(ctx context.Context, provider common.Configura
 	// wait for lifecyle become running
 	_, pollErr := c.GetSubnet(ctx, pollGetRequest)
 	if pollErr != nil {
-		return nil, fmt.Errorf("error creating subnet: %v", err)
+		return core.Subnet{}, fmt.Errorf("error creating subnet: %v", err)
 	}
 
 	// update the security rules
@@ -739,7 +831,7 @@ func CreateOrGetSubnetWithDetails(ctx context.Context, provider common.Configura
 
 	getResp, err := c.GetSecurityList(ctx, getReq)
 	if err != nil {
-		return nil, fmt.Errorf("error creating subnet: %v", err)
+		return core.Subnet{}, fmt.Errorf("error creating subnet: %v", err)
 	}
 
 	// this security rule allows remote control the instance
@@ -764,20 +856,20 @@ func CreateOrGetSubnetWithDetails(ctx context.Context, provider common.Configura
 
 	_, err = c.UpdateSecurityList(ctx, updateReq)
 	if err != nil {
-		return nil, fmt.Errorf("error creating subnet: %v", err)
+		return core.Subnet{}, fmt.Errorf("error creating subnet: %v", err)
 	}
 
-	return r.Subnet
+	return r.Subnet, nil
 }
 
 // create a cluster
 func createCluster(
 	ctx context.Context,
 	client containerengine.ContainerEngineClient,
-	name, compartmentId, vcnID, kubernetesVersion, subnet1ID, subnet2ID string) (containerengine.CreateClusterResponse, error) {
+	name, CompartmentID, vcnID, kubernetesVersion, subnet1ID, subnet2ID string) (containerengine.CreateClusterResponse, error) {
 	req := containerengine.CreateClusterRequest{}
 	req.Name = common.String(name)
-	req.CompartmentId = common.String(compartmentId)
+	req.CompartmentId = common.String(CompartmentID)
 	req.VcnId = common.String(vcnID)
 	req.KubernetesVersion = common.String(kubernetesVersion)
 	req.Options = &containerengine.ClusterCreateOptions{
@@ -786,7 +878,7 @@ func createCluster(
 
 	resp, err := client.CreateCluster(ctx, req)
 	if err != nil {
-		return nil, fmt.Errorf("error creating cluster: %v", err)
+		return containerengine.CreateClusterResponse{}, fmt.Errorf("error creating cluster: %v", err)
 	}
 
 	return resp, nil
@@ -833,12 +925,34 @@ func waitUntilWorkRequestComplete(client containerengine.ContainerEngineClient, 
 
 	getWorkReq := containerengine.GetWorkRequestRequest{
 		WorkRequestId:   workReuqestID,
-		RequestMetadata: helpers.GetRequestMetadataWithCustomizedRetryPolicy(shouldRetryFunc),
+		RequestMetadata: GetRequestMetadataWithCustomizedRetryPolicy(shouldRetryFunc),
 	}
 
 	getResp, err := client.GetWorkRequest(context.Background(), getWorkReq)
 	if err != nil {
-		return nil, fmt.Errorf("error waiting work request complete: %v", err)
+		return containerengine.GetWorkRequestResponse{}, fmt.Errorf("error waiting work request complete: %v", err)
 	}
 	return getResp, nil
+}
+
+// getResourceID return a resource ID based on the filter of resource actionType and entityType
+func getResourceID(resources []containerengine.WorkRequestResource, actionType containerengine.WorkRequestResourceActionTypeEnum, entityType string) *string {
+	for _, resource := range resources {
+		if resource.ActionType == actionType && strings.ToUpper(*resource.EntityType) == entityType {
+			return resource.Identifier
+		}
+	}
+
+	fmt.Println("cannot find matched resources")
+	return nil
+}
+
+func (d *Driver) GetK8SCapabilities(ctx context.Context, opts *types.DriverOptions) (*types.K8SCapabilities, error) {
+	logrus.Debug("GetK8SCapabilities unimplemented")
+	return nil, nil
+}
+
+func (d *Driver) SetClusterSize(ctx context.Context, info *types.ClusterInfo, count *types.NodeCount) error {
+	logrus.Debug("SetClusterSize unimplemented")
+	return nil
 }
